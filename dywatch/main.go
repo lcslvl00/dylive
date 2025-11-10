@@ -142,13 +142,11 @@ func runCommand(tpl string, room *dylive.Room) error {
 }
 
 func isProcessRunning(pid int) bool {
-	process, err := os.FindProcess(pid)
+	// PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+	handle, err := syscall.OpenProcess(0x1000, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	err = process.Signal(syscall.Signal(0))
-	if err != nil {
-		return false
-	}
+	defer syscall.CloseHandle(handle)
 	return true
 }
