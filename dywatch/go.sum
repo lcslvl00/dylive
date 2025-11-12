@@ -1,2 +1,4 @@
 github.com/caiguanhao/dylive v1.2.3 h1:f06LZQ7FlxSvmZret8F6tSOanzu8TM73VYxKOgatwbs=
 github.com/caiguanhao/dylive v1.2.3/go.mod h1:U9nS57q+A/GymasSGSDe1O1q9ed8YhSyRN1fPRcFbL4=
+github.com/vanym/golang-netscape-cookiejar v1.0.0 h1:Yi5ZTiGaq0jmw/Dst1aulMcEjuzCGUn7FNsy5cq97cE=
+github.com/vanym/golang-netscape-cookiejar v1.0.0/go.mod h1:xX9CJoRqG3KkxhfMdrkweBcuMSSyZP822xHHwXcUO24=

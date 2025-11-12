@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"os"
 	"strconv"
 	"strings"
+
+	netscapecookiejar "github.com/vanym/golang-netscape-cookiejar"
 )
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
@@ -290,7 +295,7 @@ func GetRoom(ctx context.Context, douyinId string) (*Room, error) {
 		return nil, err
 	}
 	if len(data) == 0 || data[0] == "" {
-		return nil, fmt.Errorf("DouyinId %s does not exist", douyinId)
+		return nil, fmt.Errorf("!!DouyinId %s does not exist", douyinId)
 	}
 	roomsData := data[0]
 	var page dyliveRoomDetails
@@ -345,14 +350,59 @@ func GetRoom(ctx context.Context, douyinId string) (*Room, error) {
 	}, nil
 }
 
+func getCookieJar() (http.CookieJar, error) {
+
+	/*
+		rawCookies, err := os.ReadFile("C:\\Users\\jzabl\\Downloads\\live.douyin.com_cookies.txt")
+		if err != nil {
+			return nil, err
+		}
+		cookie, err := netscapecookiejar.Unmarshal(string(rawCookies))
+		if err != nil {
+			return nil, err
+		}
+
+		return cookie, err
+	*/
+
+	cookiePath := "C:\\Users\\jzabl\\Downloads\\live.douyin.com_cookies.txt"
+
+	subjar, err := cookiejar.New(&cookiejar.Options{})
+	jar, err := netscapecookiejar.New(&netscapecookiejar.Options{
+		SubJar:        subjar,
+		AutoWritePath: cookiePath,
+		WriteHeader:   true,
+	})
+	file, err := os.Open(cookiePath)
+	_, err = jar.ReadFrom(file)
+	file.Close()
+
+	return jar, err
+}
+
 func getLivePageData(ctx context.Context, douyinId string, filters ...string) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://live.douyin.com/"+douyinId, nil)
 	if err != nil {
 		return nil, err
 	}
+
+	jar, err := getCookieJar()
+	if err != nil {
+		log.Println("Error getting cookies from jar")
+	}
+
+	//proxyURL, _ := url.Parse("http://127.0.0.1:8866")
+	//proxy := http.ProxyURL(proxyURL)
+	//transport := &http.Transport{Proxy: proxy}
+
+	client := &http.Client{
+		Jar: jar,
+		//	Transport: transport,
+	}
+
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Cookie", "__ac_nonce=064caded4009deafd8b89")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -373,6 +423,12 @@ func getLivePageData(ctx context.Context, douyinId string, filters ...string) ([
 		}
 		output = append(output, ret)
 	}
+
+	if strings.Contains(string(b), "verify_data") {
+		log.Println("Captcha requested!")
+		return output, nil
+	}
+
 	return output, nil
 }
 
