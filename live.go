@@ -3,11 +3,13 @@ package dylive
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +18,9 @@ import (
 )
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+
+var ErrCaptchaRequested = errors.New("captcha requested")
+var ErrGuestCookieRetreivalFailed = errors.New("guest cookie retieve failure")
 
 type (
 	Category struct {
@@ -177,6 +182,7 @@ func (room Room) urlForQuality(urls map[string]string, quality string) string {
 		switch quality {
 		case "uhd":
 			if strings.Contains(key, "FULL_HD") || strings.Contains(value, "_uhd") {
+				log.Println("Returning UHD quality")
 				return value
 			}
 		case "hd":
@@ -195,6 +201,7 @@ func (room Room) urlForQuality(urls map[string]string, quality string) string {
 			return room.StreamUrl
 		}
 	}
+	log.Println("Returning default quality!")
 	return room.StreamUrl
 }
 
@@ -288,9 +295,151 @@ type (
 	}
 )
 
+type StreamURL struct {
+	FlvPullURL map[string]string `json:"flv_pull_url"`
+}
+
+type Data struct {
+	IDStr        string `json:"id_str"`
+	Status       int    `json:"status"`
+	StatusStr    string `json:"status_str"`
+	Title        string `json:"title"`
+	UserCountStr string `json:"user_count_str"`
+	Cover        struct {
+		URLList []string `json:"url_list"`
+	} `json:"cover"`
+	StreamURL struct {
+		FlvPullURL        map[string]string `json:"flv_pull_url"`
+		HlsPullURLMap     map[string]string `json:"hls_pull_url_map"`
+		HlsPullURL        string            `json:"hls_pull_url"`
+		DefaultResolution string            `json:"default_resolution"`
+		StreamOrientation int               `json:"stream_orientation"`
+	} `json:"stream_url"`
+}
+
+type Response struct {
+	OuterData struct {
+		OuterData2 struct {
+			Data []Data `json:"data"`
+		} `json:"data"`
+	} `json:"data"`
+}
+
+type CookieResponse struct {
+	Data struct {
+		Cookie string `json:"Cookie"`
+	} `json:"data"`
+}
+
+func GetGuestCookieTikHub(tikhubToken string) (string, error) {
+
+	url := "https://api.tikhub.io/api/v1/douyin/web/fetch_douyin_web_guest_cookie?user_agent=" + url.QueryEscape("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36")
+	method := "GET"
+
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, nil)
+
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+	req.Header.Add("Authorization", "Bearer "+tikhubToken)
+
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+		return "", err
+	}
+
+	var response CookieResponse
+	err = json.Unmarshal([]byte(body), &response)
+	if err != nil {
+		log.Println("Error deserializing tikhub JSON. HTTP response code was " + res.Status + " err is " + err.Error() + " response: " + string(body))
+		return "", err
+	}
+
+	cookie := response.Data.Cookie
+	if len(cookie) == 0 {
+		log.Println("Error retreiving guest cookie: " + string(body))
+		return "", ErrGuestCookieRetreivalFailed
+	}
+	return cookie, nil
+}
+
+func GetRoomTikHub(ctx context.Context, douyinId string, tikhubToken string) (*Room, error) {
+
+	url := "https://api.tikhub.io/api/v1/douyin/web/fetch_user_live_videos?webcast_id=" + douyinId
+	method := "GET"
+
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, nil)
+
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+	req.Header.Add("Authorization", "Bearer "+tikhubToken)
+
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	var response Response
+	err = json.Unmarshal([]byte(body), &response)
+	if err != nil {
+		log.Println("Error deserializing tikhub JSON. HTTP response code was " + res.Status + " err is " + err.Error() + " response: " + string(body))
+		return nil, err
+	}
+
+	if len(response.OuterData.OuterData2.Data) > 0 {
+
+		d := response.OuterData.OuterData2.Data[0]
+
+		return &Room{
+			Id:                d.IDStr,
+			DouyinId:          douyinId,
+			StatusCode:        d.Status,
+			Name:              d.Title,
+			CoverUrl:          "",
+			WebUrl:            "https://live.douyin.com/" + douyinId,
+			StreamUrl:         "",
+			FlvStreamUrls:     d.StreamURL.FlvPullURL,
+			HlsStreamUrls:     d.StreamURL.HlsPullURLMap,
+			CurrentUsersCount: d.UserCountStr,
+			TotalUsersCount:   d.UserCountStr,
+			User: User{
+				Name:    "user",
+				Picture: "picture",
+			},
+		}, nil
+	}
+
+	log.Println("Error interpreting tikhub response: " + string(body))
+
+	return nil, err
+}
+
 // GetRoom get live stream room details by Douyin ID (抖音号)
-func GetRoom(ctx context.Context, douyinId string) (*Room, error) {
-	data, err := getLivePageData(ctx, douyinId, "flv_pull_url")
+func GetRoom(ctx context.Context, douyinId string, cookies string) (*Room, error) {
+	data, err := getLivePageData(ctx, douyinId, cookies, "flv_pull_url")
 	if err != nil {
 		return nil, err
 	}
@@ -380,11 +529,13 @@ func getCookieJar() (http.CookieJar, error) {
 	return jar, err
 }
 
-func getLivePageData(ctx context.Context, douyinId string, filters ...string) ([]string, error) {
+func getLivePageData(ctx context.Context, douyinId string, cookies string, filters ...string) ([]string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://live.douyin.com/"+douyinId, nil)
 	if err != nil {
 		return nil, err
 	}
+
+	log.Println("Fetching live page data directly from douyin")
 
 	jar, err := getCookieJar()
 	if err != nil {
@@ -397,11 +548,11 @@ func getLivePageData(ctx context.Context, douyinId string, filters ...string) ([
 
 	client := &http.Client{
 		Jar: jar,
-		//	Transport: transport,
+		//Transport: transport,
 	}
 
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Cookie", "__ac_nonce=064caded4009deafd8b89")
+	req.Header.Set("Cookie", cookies)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -426,7 +577,7 @@ func getLivePageData(ctx context.Context, douyinId string, filters ...string) ([
 
 	if strings.Contains(string(b), "verify_data") {
 		log.Println("Captcha requested!")
-		return output, nil
+		return nil, ErrCaptchaRequested
 	}
 
 	return output, nil

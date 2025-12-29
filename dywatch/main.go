@@ -24,6 +24,7 @@ var (
 	outputJson                  bool
 	commadnTemplate             string
 	checkCommand                bool
+	tikHubToken                 string
 )
 
 func main() {
@@ -32,6 +33,7 @@ func main() {
 	flag.BoolVar(&outputJson, "json", false, "output json instead of url")
 	flag.StringVar(&commadnTemplate, "run", "", "command template to run; use @/path/to/template.sh to specify a template file")
 	flag.BoolVar(&checkCommand, "check", false, "re-run command if process does not exist")
+	flag.StringVar(&tikHubToken, "thtoken", "", "TikHub token")
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Monitor live streams from Douyin.")
 		fmt.Fprintln(flag.CommandLine.Output())
@@ -39,39 +41,72 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	for {
 		getRoom()
-		time.Sleep(5 * time.Second)
 	}
+}
+
+func sleepRoomNotActive() {
+
+	sleepDurationMin := 1
+	nowHour := time.Now().Local().Hour()
+	if nowHour >= 5 && nowHour <= 12 { // 5am - 12pm
+		sleepDurationMin = 1
+	} else if nowHour > 12 && nowHour < 19 { // 12pm - 7pm
+		sleepDurationMin = 5
+	} else {
+		sleepDurationMin = 5
+	}
+	log.Printf("Current time is %d sleeping for %d minutes", nowHour, sleepDurationMin)
+	time.Sleep(time.Duration(sleepDurationMin) * time.Minute)
 }
 
 func getRoom() {
 	ids := flag.Args()
+	cookies := ""
 	if len(ids) == 0 {
 		log.Println("At least one Douyin ID is required.")
 		os.Exit(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, id := range ids {
-		room, err := dylive.GetRoom(ctx, id)
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		if currentRooms[id] == room.Id {
-			if checkCommand && room.StatusCode == dylive.RoomStatusLiveOn && pids[room.Id] > 0 && !isProcessRunning(pids[room.Id]) {
-				log.Println("Process", pids[room.Id], "exited, restart")
-				updateStreamUrl(room)
-				if err := runCommand(commadnTemplate, room); err != nil {
-					log.Println(err)
-				}
+	for _, userId := range ids {
+
+		if checkCommand && pids[userId] > 0 {
+
+			if isProcessRunning(pids[userId]) {
+				//log.Println("PID active; skipping live room query")
+				time.Sleep(5 * time.Second)
+				continue
+			} else {
+				log.Println("Process", pids[userId], "exited; check to see if room still active")
 			}
+		}
+
+		room, err := dylive.GetRoom(ctx, userId, cookies)
+		if err == dylive.ErrCaptchaRequested {
+			cookies, err = dylive.GetGuestCookieTikHub(tikHubToken)
+			if err != nil {
+				log.Println("Error retreiving guest cookies")
+			}
+			sleepRoomNotActive()
+		}
+
+		//room, err := dylive.GetRoomTikHub(ctx, userId, tikHubToken)
+		if err != nil || room == nil {
+			log.Println(err)
+
+			sleepRoomNotActive()
 			continue
 		}
-		currentRooms[id] = room.Id
+
+		currentRooms[userId] = userId
 		if room.StatusCode != dylive.RoomStatusLiveOn {
 			log.Printf("%s (%s) hasn't started livestream yet.", room.User.Name, room.DouyinId)
+			delete(pids, userId)
+
+			sleepRoomNotActive()
 			continue
 		}
 		log.Printf("%s (%s) is live.", room.User.Name, room.DouyinId)
@@ -82,7 +117,7 @@ func getRoom() {
 			fmt.Println(room.StreamUrl)
 		}
 		if commadnTemplate != "" {
-			if err := runCommand(commadnTemplate, room); err != nil {
+			if err := runCommand(commadnTemplate, room, userId); err != nil {
 				log.Println(err)
 			}
 		}
@@ -97,7 +132,7 @@ func updateStreamUrl(room *dylive.Room) {
 	}
 }
 
-func runCommand(tpl string, room *dylive.Room) error {
+func runCommand(tpl string, room *dylive.Room, userId string) error {
 	if len(tpl) > 1 && strings.HasPrefix(tpl, "@") {
 		content, _ := os.ReadFile(tpl[1:])
 		tpl = string(content)
@@ -128,7 +163,7 @@ func runCommand(tpl string, room *dylive.Room) error {
 	err = cmd.Start()
 	if err == nil {
 		log.Println("Command", cmdStr, "started as PID", cmd.Process.Pid)
-		pids[room.Id] = cmd.Process.Pid
+		pids[userId] = cmd.Process.Pid
 		go func() {
 			err := cmd.Wait()
 			if err != nil {
