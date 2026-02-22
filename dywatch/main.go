@@ -96,6 +96,7 @@ func getRoom() {
 		//room, err := dylive.GetRoomTikHub(ctx, userId, tikHubToken)
 		if err != nil || room == nil {
 			log.Println(err)
+			delete(pids, userId)
 
 			sleepRoomNotActive()
 			continue
